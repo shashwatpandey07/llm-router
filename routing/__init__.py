@@ -6,6 +6,7 @@ model selection, and routing logic.
 """
 
 from .difficulty import QueryDifficultyEstimator
+from .router import LLMRouter
 
-__all__ = ["QueryDifficultyEstimator"]
+__all__ = ["QueryDifficultyEstimator", "LLMRouter"]
 

@@ -2,5 +2,7 @@
 Utility functions for the LLM Router project.
 """
 
-__all__ = []
+from .metrics import MetricsLogger
+
+__all__ = ["MetricsLogger"]
 
