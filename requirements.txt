@@ -5,6 +5,12 @@ uvicorn>=0.23.0
 # llama.cpp backend (install with Metal support: CMAKE_ARGS="-DLLAMA_METAL=on" pip install llama-cpp-python)
 llama-cpp-python>=0.3.0
 
+# OpenAI API for remote LLM
+openai>=1.0.0
+
+# Web UI
+streamlit>=1.28.0
+
 # Optional: Keep transformers for future cloud API integrations
 # torch>=2.0.0
 # transformers>=4.30.0
