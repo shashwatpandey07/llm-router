@@ -57,19 +57,30 @@ class LocalLLM(BaseLLM):
         """
         start = time.time()
         
+        # Format prompt for better instruction following
+        # Phi-2 is a base model, so we add a simple instruction prefix
+        formatted_prompt = f"Answer the following question concisely:\n\n{prompt}\n\nAnswer:"
+        
         # Generate using llama.cpp
         # Add stop sequences to prevent model from continuing indefinitely
         # Phi-2 is a base model trained on textbooks, so it tends to generate "Exercise" sections
+        # Also stop on code blocks and class definitions
         stop_sequences = [
             "\n\nExercise",
             "\n\nQuestion", 
             "\n\nProblem",
             "\nExercise",
+            "\n\n```",  # Code blocks
+            "\n```",    # Code blocks
+            "\ndef ",   # Python function definitions
+            "\nclass ", # Python class definitions
+            "\nimport ", # Python imports
+            "\nfrom ",  # Python imports
             "<|endoftext|>"
         ]
         
         output = self.llm(
-            prompt,
+            formatted_prompt,
             max_tokens=max_tokens,
             temperature=0.0,      # Deterministic (greedy) generation
             stop=stop_sequences   # Stop on common continuation patterns
@@ -81,8 +92,39 @@ class LocalLLM(BaseLLM):
         text = output["choices"][0]["text"]
         usage = output["usage"]
         
+        # Clean up the response
+        # Remove any code-like patterns that might have slipped through
+        cleaned_text = text.strip()
+        
+        # If response starts with code-like patterns, try to extract the actual answer
+        if cleaned_text.startswith("def ") or cleaned_text.startswith("class ") or cleaned_text.startswith("import "):
+            # This looks like code, try to find the actual answer
+            # Split by newlines and find the first non-code line
+            lines = cleaned_text.split("\n")
+            answer_lines = []
+            for line in lines:
+                line_stripped = line.strip()
+                # Skip code-like lines
+                if (line_stripped.startswith("def ") or 
+                    line_stripped.startswith("class ") or 
+                    line_stripped.startswith("import ") or
+                    line_stripped.startswith("from ") or
+                    line_stripped.startswith("@") or
+                    line_stripped.startswith("#")):
+                    continue
+                # If we find a normal line, use it and everything after
+                if line_stripped and not line_stripped.startswith("    ") and not line_stripped.startswith("\t"):
+                    answer_lines = lines[lines.index(line):]
+                    break
+            
+            if answer_lines:
+                cleaned_text = "\n".join(answer_lines).strip()
+            else:
+                # If we can't find a good answer, return a fallback
+                cleaned_text = "I apologize, but I couldn't generate a proper response. Please try rephrasing your question."
+        
         return {
-            "text": text.strip(),
+            "text": cleaned_text,
             "input_tokens": usage["prompt_tokens"],
             "output_tokens": usage["completion_tokens"],
             "latency_ms": (end - start) * 1000,
