@@ -7,6 +7,7 @@ model selection, and routing logic.
 
 from .difficulty import QueryDifficultyEstimator
 from .router import LLMRouter
+from .verifier import ResponseVerifier, VerificationResult
 
-__all__ = ["QueryDifficultyEstimator", "LLMRouter"]
+__all__ = ["QueryDifficultyEstimator", "LLMRouter", "ResponseVerifier", "VerificationResult"]
 

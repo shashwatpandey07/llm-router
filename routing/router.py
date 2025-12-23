@@ -8,6 +8,7 @@ based on query difficulty, with escalation and cost optimization.
 from typing import Dict, Optional
 from llm.base import BaseLLM
 from .difficulty import QueryDifficultyEstimator
+from .verifier import ResponseVerifier
 
 
 class LLMRouter:
@@ -37,6 +38,30 @@ class LLMRouter:
         self.difficulty_estimator = difficulty_estimator
         self.local_llm = local_llm
         self.remote_llm = remote_llm
+        self.verifier = ResponseVerifier()
+        self.max_retries = 1  # Allow one regeneration attempt before escalating
+    
+    def _max_tokens_for_difficulty(self, difficulty: float) -> int:
+        """
+        Determine adaptive token budget based on query difficulty.
+        
+        This implements adaptive token budgeting:
+        - Easy queries (< 0.3): 128 tokens (cheap & fast)
+        - Medium queries (0.3-0.6): 256 tokens (enough for explanations)
+        - Hard queries (≥ 0.6): 512 tokens (proofs, analysis, multi-part answers)
+        
+        Args:
+            difficulty: Query difficulty score (0.0 to 1.0)
+            
+        Returns:
+            Maximum tokens to generate
+        """
+        if difficulty < 0.3:
+            return 128
+        elif difficulty < 0.6:
+            return 256
+        else:
+            return 512
     
     def route(self, query: str) -> Dict:
         """
@@ -67,100 +92,159 @@ class LLMRouter:
         # 1. Estimate difficulty
         difficulty = self.difficulty_estimator.estimate(query)
         
+        # 2. Determine adaptive token budget based on difficulty
+        max_tokens = self._max_tokens_for_difficulty(difficulty)
+        
         # Cost units (relative)
         LOCAL_COST = 1
         REMOTE_COST = 20
         
-        # Helper: confidence check
-        def is_low_confidence(response_text: str, output_tokens: int) -> bool:
-            """Check if response indicates low confidence."""
-            low_conf_phrases = [
-                "i'm not sure",
-                "i am not sure",
-                "cannot determine",
-                "not enough information",
-                "unclear",
-                "it depends"
-            ]
-            
-            text_lower = response_text.lower()
-            
-            # Low confidence if output is too short
-            if output_tokens < 20:
-                return True
-            
-            # Low confidence if contains uncertainty phrases
-            if any(p in text_lower for p in low_conf_phrases):
-                return True
-            
-            # Low confidence if response doesn't end with punctuation
-            if not response_text.strip().endswith((".", "!", "?")):
-                return True
-            
-            return False
+        # Helper: build continuation prompt for truncated responses
+        def build_continuation_prompt(original_query: str, partial_answer: str) -> str:
+            """Build a prompt to continue a truncated answer."""
+            return (
+                f"Question:\n{original_query}\n\n"
+                f"Partial answer:\n{partial_answer}\n\n"
+                "Continue the answer. Finish the current sentence and conclude clearly in 2–3 sentences."
+            )
         
-        # 2. Easy queries → local model (shorter responses)
+        # 2. Easy queries → local model with adaptive tokens, verify and regenerate if needed
         if difficulty < 0.3:
-            result = self.local_llm.generate(query, max_tokens=64)
+            retry_count = 0
+            current_max_tokens = max_tokens
+            
+            while True:
+                result = self.local_llm.generate(query, max_tokens=current_max_tokens)
+                
+                # Verify the response
+                verdict = self.verifier.verify(
+                    answer=result["text"],
+                    output_tokens=result["output_tokens"],
+                    max_tokens=current_max_tokens,
+                    query=query,  # For relevance checking
+                    difficulty=difficulty  # For relevance gating
+                )
+                
+                # If verification passes, return
+                if verdict.passed:
+                    result["verification"] = "passed"
+                    break
+                
+                # If truncated and we have retry budget, regenerate with more tokens
+                if verdict.truncated and retry_count < self.max_retries:
+                    retry_count += 1
+                    current_max_tokens *= 2  # Double the token budget
+                    continue
+                
+                # Verification failed and no retries left
+                result["verification"] = f"failed: {', '.join(verdict.reasons)}"
+                break
+            
             # Estimate what remote call would cost (for cost_saved calculation)
             estimated_remote_cost = (
                 (result["input_tokens"] / 1000) * 0.005 +
                 (result["output_tokens"] / 1000) * 0.015
             )
+            
+            routing_decision = "repaired" if retry_count > 0 and verdict.passed else "local"
             result.update({
                 "difficulty": difficulty,
-                "routing_decision": "local",
+                "routing_decision": routing_decision,
                 "cost_usd": 0.0,  # Local model cost is effectively $0
                 "cost_saved_usd": round(estimated_remote_cost, 6),
                 "cost_saved": REMOTE_COST - LOCAL_COST  # Keep relative units too
             })
             return result
         
-        # 3. Medium queries → local first, maybe escalate (medium responses)
+        # 3. Medium queries → local first, verify, regenerate if needed, escalate if still fails
         if difficulty < 0.6:
-            local_result = self.local_llm.generate(query, max_tokens=128)
+            retry_count = 0
+            current_max_tokens = max_tokens
             
-            low_conf = is_low_confidence(
-                local_result["text"],
-                local_result["output_tokens"]
-            )
+            while True:
+                local_result = self.local_llm.generate(query, max_tokens=current_max_tokens)
+                
+                # Verify the response
+                verdict = self.verifier.verify(
+                    answer=local_result["text"],
+                    output_tokens=local_result["output_tokens"],
+                    max_tokens=current_max_tokens,
+                    query=query,  # For relevance checking
+                    difficulty=difficulty  # For relevance gating
+                )
+                
+                # If verification passes, return local result
+                if verdict.passed:
+                    local_result["verification"] = "passed"
+                    break
+                
+                # If truncated and we have retry budget, regenerate with more tokens
+                if verdict.truncated and retry_count < self.max_retries:
+                    retry_count += 1
+                    current_max_tokens *= 2  # Double the token budget
+                    continue
+                
+                # Verification failed and no retries left
+                local_result["verification"] = f"failed: {', '.join(verdict.reasons)}"
+                break
             
-            if low_conf and self.remote_llm is not None:
+            # If verification passed (after regeneration if needed), return local result
+            if verdict.passed:
+                estimated_remote_cost = (
+                    (local_result["input_tokens"] / 1000) * 0.005 +
+                    (local_result["output_tokens"] / 1000) * 0.015
+                )
+                routing_decision = "repaired" if retry_count > 0 else "local"
+                local_result.update({
+                    "difficulty": difficulty,
+                    "routing_decision": routing_decision,
+                    "cost_usd": 0.0,
+                    "cost_saved_usd": round(estimated_remote_cost, 6),
+                    "cost_saved": REMOTE_COST - LOCAL_COST
+                })
+                return local_result
+            
+            # If verification failed (uncertainty, low relevance, or regeneration failed), escalate
+            if self.remote_llm is not None:
                 remote_result = self.remote_llm.generate(query)
-                # Escalation negates savings (we paid for both local + remote)
-                estimated_remote_cost = remote_result.get("cost_usd", 0.0)
                 remote_result.update({
                     "difficulty": difficulty,
                     "routing_decision": "escalated",
-                    "cost_saved_usd": 0.0,  # Escalation negates savings
-                    "cost_saved": 0  # escalation negates savings
+                    "cost_saved_usd": 0.0,
+                    "cost_saved": 0,
+                    "verification": f"failed: {', '.join(verdict.reasons)}"
                 })
                 return remote_result
-            
-            # Local was sufficient
-            estimated_remote_cost = (
-                (local_result["input_tokens"] / 1000) * 0.005 +
-                (local_result["output_tokens"] / 1000) * 0.015
-            )
-            local_result.update({
-                "difficulty": difficulty,
-                "routing_decision": "local",
-                "cost_usd": 0.0,  # Local model cost is effectively $0
-                "cost_saved_usd": round(estimated_remote_cost, 6),
-                "cost_saved": REMOTE_COST - LOCAL_COST
-            })
-            return local_result
+            else:
+                # No remote LLM available, return local result with warning
+                local_result.update({
+                    "difficulty": difficulty,
+                    "routing_decision": "local",
+                    "cost_usd": 0.0,
+                    "cost_saved_usd": 0.0,
+                    "cost_saved": 0
+                })
+                return local_result
         
         # 4. Hard queries → remote model directly
         if self.remote_llm is None:
             raise ValueError("Remote LLM not provided for hard queries")
         
-        remote_result = self.remote_llm.generate(query)
+        remote_result = self.remote_llm.generate(query, max_tokens=max_tokens)
+        # Verify remote result too (for consistency, though we trust GPT-4o more)
+        verdict = self.verifier.verify(
+            answer=remote_result["text"],
+            output_tokens=remote_result["output_tokens"],
+            max_tokens=max_tokens,
+            query=query,  # For relevance checking
+            difficulty=difficulty  # For relevance gating
+        )
         remote_result.update({
             "difficulty": difficulty,
             "routing_decision": "remote",
             "cost_saved_usd": 0.0,  # No savings, we used the expensive model
-            "cost_saved": 0
+            "cost_saved": 0,
+            "verification": "passed" if verdict.passed else f"failed: {', '.join(verdict.reasons)}"
         })
         return remote_result
 
