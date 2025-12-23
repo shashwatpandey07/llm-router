@@ -115,6 +115,8 @@ def format_routing_decision(decision: str) -> tuple:
     """Format routing decision with color and icon."""
     if decision == "local":
         return "🟢 Local (GGUF)", "#28a745"
+    elif decision == "repaired":
+        return "🔧 Repaired (Local + Regeneration)", "#17a2b8"
     elif decision == "escalated":
         return "🟡 Escalated (Local → GPT-4o)", "#ffc107"
     else:
@@ -167,9 +169,15 @@ def main():
         st.subheader("ℹ️ About")
         st.info("""
         This system routes queries based on difficulty:
-        - **Easy** (< 0.3) → Local GGUF
-        - **Medium** (0.3-0.6) → Local + Escalate if needed
-        - **Hard** (≥ 0.6) → GPT-4o
+        - **Easy** (< 0.3) → Local GGUF (128 tokens)
+        - **Medium** (0.3-0.6) → Local (256 tokens) + Regenerate/Escalate if needed
+        - **Hard** (≥ 0.6) → GPT-4o (512 tokens)
+        
+        Features:
+        - Answer-aware verification
+        - Adaptive token budgeting
+        - Automatic regeneration on truncation
+        - Semantic relevance checking
         """)
     
     # Main content
@@ -231,6 +239,18 @@ def main():
                     decision = result.get("routing_decision", "unknown")
                     decision_label, decision_color = format_routing_decision(decision)
                     st.metric("Routing Decision", decision_label)
+                    
+                    # Show verification status if available
+                    verification = result.get("verification", "")
+                    if verification:
+                        if verification == "passed":
+                            st.success("✅ Verification: Passed")
+                        elif verification == "repaired":
+                            st.info("🔧 Verification: Repaired")
+                        elif "failed" in verification.lower():
+                            st.warning(f"⚠️ Verification: {verification}")
+                        else:
+                            st.info(f"ℹ️ Verification: {verification}")
                 
                 with col3:
                     latency = result.get("latency_ms", 0.0)
@@ -284,10 +304,23 @@ def main():
                         with col1:
                             st.write(f"**Model:** {result.get('model', 'unknown')}")
                             st.write(f"**Device:** {result.get('device', 'unknown')}")
+                            # Show adaptive token budget if available
+                            difficulty = result.get("difficulty", 0.0)
+                            if difficulty < 0.3:
+                                token_budget = 128
+                            elif difficulty < 0.6:
+                                token_budget = 256
+                            else:
+                                token_budget = 512
+                            st.write(f"**Token Budget:** {token_budget} (adaptive)")
                         with col2:
                             total_tokens = result.get("input_tokens", 0) + result.get("output_tokens", 0)
                             st.write(f"**Total Tokens:** {total_tokens}")
                             st.write(f"**Processing Time:** {end_time - start_time:.2f}s")
+                            # Show verification details if available
+                            verification = result.get("verification", "")
+                            if verification:
+                                st.write(f"**Verification:** {verification}")
                 
                 # Response
                 st.divider()
@@ -315,10 +348,14 @@ def main():
                 col1, col2, col3, col4 = st.columns(4)
                 
                 with col1:
-                    if result.get("routing_decision") == "local":
+                    decision = result.get("routing_decision", "unknown")
+                    if decision == "local":
                         st.success("✅ Local Model")
                         st.caption("Zero Cost")
-                    elif result.get("routing_decision") == "escalated":
+                    elif decision == "repaired":
+                        st.info("🔧 Repaired")
+                        st.caption("Regenerated with more tokens")
+                    elif decision == "escalated":
                         st.warning("⚠️ Escalated")
                         st.caption("Low Confidence")
                     else:
