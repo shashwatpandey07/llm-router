@@ -394,18 +394,6 @@ Data Scientist | Applied ML | Systems + LLM Infrastructure
 
 IIT Guwahati
 
-## 🏁 Final Verdict
-
-This is not a toy project.
-
-This is:
-- ✅ **Interview-ready**
-- ✅ **Portfolio-ready**
-- ✅ **System-design heavy**
-- ✅ **Research-inspired**
-- ✅ **Production-aligned**
-
-When recruiters say "Tell me about a system you designed" — this is your answer.
 
 ## License
 
