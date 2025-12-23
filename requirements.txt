@@ -11,6 +11,9 @@ openai>=1.0.0
 # Web UI
 streamlit>=1.28.0
 
+# Embeddings for relevance checking
+numpy>=1.24.0
+
 # Optional: Keep transformers for future cloud API integrations
 # torch>=2.0.0
 # transformers>=4.30.0
