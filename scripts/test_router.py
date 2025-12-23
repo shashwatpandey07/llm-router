@@ -134,7 +134,7 @@ def main():
     total_cost_saved = 0
     total_cost_saved_usd = 0.0
     total_cost_usd = 0.0
-    routing_stats = {"local": 0, "escalated": 0, "remote": 0}
+    routing_stats = {"local": 0, "repaired": 0, "escalated": 0, "remote": 0}
     
     for i, (query, description) in enumerate(test_queries, 1):
         print(f"{i}. Query: {query}")
@@ -148,13 +148,18 @@ def main():
             metrics_logger.log(result, query)
             
             decision = result["routing_decision"]
-            routing_stats[decision] += 1
+            routing_stats[decision] = routing_stats.get(decision, 0) + 1
+            if decision == "repaired":
+                routing_stats["local"] = routing_stats.get("local", 0) + 1  # Count repaired as local success
             total_cost_saved += result.get("cost_saved", 0)
             total_cost_saved_usd += result.get("cost_saved_usd", 0.0)
             total_cost_usd += result.get("cost_usd", 0.0)
             
             print(f"   ✅ Routing Decision: {decision.upper()}")
             print(f"   📊 Difficulty: {result['difficulty']:.3f}")
+            verification = result.get('verification', 'unknown')
+            if verification:
+                print(f"   ✓ Verification: {verification}")
             print(f"   💰 Cost: ${result.get('cost_usd', 0.0):.6f}")
             print(f"   💵 Cost Saved: ${result.get('cost_saved_usd', 0.0):.6f} ({result.get('cost_saved', 0)} units)")
             print(f"   ⏱️  Latency: {result['latency_ms']:.2f} ms")
@@ -173,9 +178,10 @@ def main():
     print("=" * 80)
     print(f"Total queries tested: {len(test_queries)}")
     print(f"Routing decisions:")
-    print(f"  🟢 Local:     {routing_stats['local']}")
-    print(f"  🟡 Escalated: {routing_stats['escalated']}")
-    print(f"  🔴 Remote:    {routing_stats['remote']}")
+    print(f"  🟢 Local:     {routing_stats.get('local', 0)}")
+    print(f"  🔧 Repaired:  {routing_stats.get('repaired', 0)}")
+    print(f"  🟡 Escalated: {routing_stats.get('escalated', 0)}")
+    print(f"  🔴 Remote:    {routing_stats.get('remote', 0)}")
     print(f"Total cost: ${total_cost_usd:.6f}")
     print(f"Total cost saved: ${total_cost_saved_usd:.6f} ({total_cost_saved} units)")
     
